@@ -1,0 +1,8 @@
+LIBRARY dinput8
+EXPORTS
+    DirectInput8Create = p_DirectInput8Create @1
+    DllCanUnloadNow = p_DllCanUnloadNow PRIVATE
+    DllGetClassObject = p_DllGetClassObject PRIVATE
+    DllRegisterServer = p_DllRegisterServer PRIVATE
+    DllUnregisterServer = p_DllUnregisterServer PRIVATE
+    GetdfDIJoystick = p_GetdfDIJoystick
