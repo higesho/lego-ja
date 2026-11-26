@@ -67,7 +67,12 @@ def build(base_path, chars, out_path, tex_w=4096):
         limit_x = tex_w
         if x + w + 2 > limit_x:
             y += CELL_H
-            x = ow if y + CELL_H <= oh else 0
+            x = ow
+            if y + CELL_H > oh:
+                # below the original atlas: the full width is free. Never start a row that dips into
+                # the original atlas area (its mip 0 blocks are restored from the original file).
+                y = max(y, oh)
+                x = 0
         pos[ch] = (x, y)
         x += w + 2
     tex_h = max(512, oh)

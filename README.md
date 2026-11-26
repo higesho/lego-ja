@@ -11,7 +11,7 @@ Steam で販売されている PC 版を対象にしています。
 
 | 作品 | 状態 | ダウンロード |
 |---|---|---|
-| LEGO ロード・オブ・ザ・リング（LEGO The Lord of the Rings） | 公開中 | [LEGOLOTR_JP.zip](https://github.com/higesho/lego-ja/releases/tag/lotr-v1.0) |
+| LEGO ロード・オブ・ザ・リング（LEGO The Lord of the Rings） | 公開中（v1.1） | [LEGOLOTR_JP.zip](https://github.com/higesho/lego-ja/releases/tag/lotr-v1.1) |
 
 入れ方と外し方は、サイトの各作品のページをご覧ください。
 どのパッチも、ゲームのファイルを書き換えません。配布物には原作のプログラムやデータは入っていません。
