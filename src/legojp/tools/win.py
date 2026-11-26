@@ -15,7 +15,11 @@ C = 'L:/SteamLibrary/steamapps/common/'
 GAMES = {'marvel': ('LEGO Marvel Super Heroes', 'LEGOMARVEL.exe', 249130),
          'hp1': ('LEGO Harry Potter', 'LEGOHarryPotter.exe', 21130),
          'hp2': ('LEGO Harry Potter Years 5-7', 'harry2.exe', 204120),
-         'sw': ('Lego Star Wars Saga', 'LEGOStarWarsSaga.exe', 32440)}
+         'sw': ('Lego Star Wars Saga', 'LEGOStarWarsSaga.exe', 32440),
+         'bat1': ('Lego Batman', 'LEGOBatman.exe', 21000),
+         'bat2': ('LEGO Batman 2', 'LEGOBatman2.exe', 213330),
+         'bat3': ('LEGO Batman 3 Beyond Gotham', 'LEGOBatman3.exe', 313690),
+         'hobbit': ('LEGO - The Hobbit', 'LEGOHobbit.exe', 285160)}
 GKEY = os.environ.get('LEGOJP_GAME') or open(os.path.join(ROOT, 'work', 'game.txt')).read().strip()
 GAME = C + GAMES[GKEY][0]
 PIDF = os.path.join(ROOT, 'work', 'pid.txt')

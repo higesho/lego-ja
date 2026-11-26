@@ -1,7 +1,7 @@
 # python mkrelease.py <game> <version> <date>  -> release/<ZIP>.zip (dinput8.dll + 読んでください.txt + OFL.txt)
 import sys, os, zipfile, shutil
 ROOT = os.path.dirname(os.path.abspath(__file__))
-LOTR_OFL = os.path.join(ROOT, 'OFL.txt')   # SIL OFL 1.1 の本文（先頭の説明は書き換える）
+LOTR_OFL = 'L:/project4/lotr-ja/release/pkg/OFL.txt'
 
 G = {
  'hp1': dict(
@@ -29,6 +29,32 @@ G = {
     what='ゲーム中のヒント、レベルやキャラクター・乗り物の名前、エクストラやショップ、\nメニューや設定の画面（映像設定・エフェクト設定を含む）まで、ゲームの中の文章を日本語にしています。',
     subs=None,
     tm='STAR WARS と関連する名前は Lucasfilm Ltd. の商標です。'),
+ 'bat1': dict(
+    name='LEGO バットマン ザ・ビデオゲーム', steam='LEGO® Batman™: The Videogame', exe='LEGOBatman.exe', zip='LEGOBAT1_JP',
+    font='Noto Sans JP', fontweight='Bold',
+    what='ゲーム中のヒント、ヒーローとヴィランの紹介、レベルやキャラクター・乗り物の名前、エクストラ、\nメニューや設定の画面（映像設定・エフェクト設定を含む）まで、ゲームの中の文章を日本語にしています。\nこのゲームのせりふは声のない身ぶりなので、字幕はありません。',
+    subs=None,
+    tm='BATMAN と関連する名前は DC の商標です。'),
+ 'bat2': dict(
+    name='LEGO バットマン2 DC スーパーヒーローズ', steam='LEGO® Batman™ 2: DC Super Heroes', exe='LEGOBatman2.exe', zip='LEGOBAT2_JP',
+    font='Noto Sans JP', fontweight='Bold',
+    what='ムービーとゲーム中の字幕、ヒント、ゴッサム・シティのニュース、キャラクターやアイテムの名前、\nメニューや設定の画面まで、ゲームの中の文章を日本語にしています。\n声は英語のままで、字幕が日本語で出ます。',
+    subs='字幕は最初はオフになっています。タイトルの「オプション」で「字幕」を「オン」にしてください。',
+    tm='BATMAN、DC と関連する名前は DC の商標です。'),
+ 'bat3': dict(
+    name='LEGO バットマン3 ザ・ゲーム ゴッサムから宇宙へ', steam='LEGO® Batman™ 3: Beyond Gotham', exe='LEGOBatman3.exe', zip='LEGOBAT3_JP',
+    font='Noto Sans JP', fontweight='Bold',
+    what='ムービーとゲーム中の字幕、ヒント、キャラクターやアイテムの名前、\nメニューや設定の画面まで、ゲームの中の文章を日本語にしています。\n声は英語のままで、字幕が日本語で出ます。',
+    subs='字幕は最初はオフになっています。タイトルの「オプション」で「字幕」を「オン」にしてください。',
+    extra='・このゲームのデータには日本語の文章と文字が入っていますが、PC 版では選べません。\n  このパッチはそれを表示できるようにし、日本語のない部分（PC 用の設定画面など）を訳して補っています。\n  そのため、配布物の中にはゲームの日本語の文章や文字は入っていません。\n',
+    fontnote='・日本語の文字はゲームに入っている日本語フォントを使い、足りない文字だけ\n  %s（SIL Open Font License 1.1）から作った絵を dinput8.dll に入れて使っています。\n  ライセンスは同梱の OFL.txt をご覧ください。\n',
+    tm='BATMAN、DC と関連する名前は DC の商標です。'),
+ 'hobbit': dict(
+    name='LEGO ホビット', steam='LEGO® The Hobbit™', exe='LEGOHobbit.exe', zip='LEGOHOBBIT_JP',
+    font='Noto Serif JP', fontweight='Bold',
+    what='ムービーとゲーム中の字幕、ヒント、中つ国の人々の頼みごと、キャラクターやアイテムの名前、\nメニューや設定の画面まで、ゲームの中の文章を日本語にしています。\n声は英語のままで、字幕が日本語で出ます。',
+    subs='字幕は最初はオフになっています。タイトルの「オプション」で「字幕」を「オン」にしてください。',
+    tm='The Hobbit と関連する名前は Middle-earth Enterprises の商標です。'),
 }
 
 def readme(g, ver, date, history):
@@ -52,7 +78,7 @@ def readme(g, ver, date, history):
     s += '・ほかの MOD やツールが dinput8.dll を使っているときは、同時には使えません。\n\n'
     s += '■ 更新履歴\n' + history + '\n'
     s += '■ クレジット\n'
-    s += '・日本語の文字は %s（SIL Open Font License 1.1）から作った絵を dinput8.dll に入れて使っています。\n  ライセンスは同梱の OFL.txt をご覧ください。\n' % d['font']
+    s += d.get('fontnote', '・日本語の文字は %s（SIL Open Font License 1.1）から作った絵を dinput8.dll に入れて使っています。\n  ライセンスは同梱の OFL.txt をご覧ください。\n') % d['font']
     s += '・このパッチの使用は自己責任でお願いします。\n・配布物には原作のプログラムやデータは入っていません。\n\n'
     s += 'LEGO は LEGO Group の商標です。%s\nゲームの画像・文章の権利は原作の権利者にあります。\n\n' % d['tm']
     s += 'ご意見・誤訳の報告: https://github.com/higesho/lego-ja/issues\n'

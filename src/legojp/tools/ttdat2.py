@@ -29,16 +29,24 @@ class Dat:
         pe = p + 4 + cnt * rs
         poolsz = struct.unpack_from('<I', info, pe)[0]
         pool = pe + 4
+        # newer DATs (LEGO The Hobbit, Batman 3): record = s16 next, s16 prev, u32 nameoff, u32 parent; root nameoff unused
+        s.parent_layout = rs == 12 and s.recs[0][2] >= poolsz
+        if s.parent_layout:
+            s.parents = [struct.unpack_from('<I', info, p + 4 + i * rs + 8)[0] for i in range(cnt)]
         s.names = []
         for r in s.recs:
+            if r[2] >= poolsz: s.names.append(''); continue
             e = info.index(b'\0', pool + r[2]); s.names.append(info[pool + r[2]:e].decode('latin1'))
         q = pool + poolsz
         s.hashes = list(struct.unpack_from('<%dI' % n, info, q)) if len(info) - q >= n * 4 else None
         # full paths
         paths = [''] * cnt; stack = [(0, s.recs[0][0])]
         for i in range(1, cnt):
-            while len(stack) > 1 and i > stack[-1][1]: stack.pop()
-            par = stack[-1][0]
+            if s.parent_layout:
+                par = s.parents[i] if s.parents[i] < i else 0
+            else:
+                while len(stack) > 1 and i > stack[-1][1]: stack.pop()
+                par = stack[-1][0]
             paths[i] = (paths[par] + '\\' if paths[par] else '') + s.names[i]
             if s.recs[i][0] > 0: stack.append((i, s.recs[i][0]))
         s.paths = {}   # entry index -> full path
@@ -51,7 +59,7 @@ class Dat:
                 if k is None: continue
             else:
                 k = -s.recs[i][0]
-            s.paths[k] = paths[i] if s.ver >= -3 else s.names[i]
+            s.paths[k] = paths[i] if s.ver >= -3 or s.parent_layout else s.names[i]
     def name(s, idx):
         p = s.paths.get(idx); return p.split('\\')[-1] if p else None
     def path_of(s, idx): return s.paths.get(idx)
@@ -59,6 +67,7 @@ class Dat:
         for k, p in s.paths.items():
             if p.upper() == path.upper(): return k
     def entry(s, idx):
-        o, z, u, fl = s.ents[idx]; return (o << 8), z, u, fl
+        # the top byte of the flags is the low byte of the offset (0 in older DATs)
+        o, z, u, fl = s.ents[idx]; return (o << 8) | (fl >> 24), z, u, fl & 0xffffff
     def raw(s, idx):
         o, z, u, fl = s.entry(idx); s.f.seek(o); return s.f.read(z)

@@ -10,6 +10,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <compressapi.h>
+#include <wchar.h>
+#include <wctype.h>
 #include "legojp.h"
 
 static HANDLE (WINAPI *o_CreateFileA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
@@ -27,8 +29,10 @@ typedef struct {
     uint32_t index, origsize;
     const uint8_t *data;
     uint32_t len;
+    int delta;              /* data is "LJPD" (built from other entries of the same DAT at first open), 1 = built, -1 = failed */
 } Repl;
 
+extern LANGID g_langid;
 static Repl *g_repl;
 static int g_nrepl;
 static int g_logreads;   /* test build: log which DAT entries the game reads (LEGOJP_LOGREADS) */
@@ -85,6 +89,64 @@ static int cmp64(const void *a, const void *b)
 }
 #endif
 
+/* ---------- delta entries ----------
+   LEGO Batman 3 carries its own Japanese text and font (unused by the PC version). The pack does not contain them:
+   a delta entry rebuilds the file from entries of the game's own DAT, plus our bytes.
+   "LJPD" u32 outlen, u8 nsrc, nsrc × {u32 index, u32 size}, then ops:
+     1 u8 src u32 off u32 len  : copy from source entry
+     2 u32 len bytes[len]      : our bytes
+     0                         : end
+   Sources must be stored uncompressed and have the expected size; otherwise the file is not replaced. */
+static int build_delta(Repl *r, HANDLE h, const uint8_t *info, uint32_t n)
+{
+    const uint8_t *p = r->data, *end = r->data + r->len;
+    uint32_t outlen, nsrc, i, o = 0;
+    uint8_t *src[8] = {0}, *out = NULL;
+    uint32_t srclen[8] = {0};
+    int ok = 0;
+    if (r->len < 9) return 0;
+    outlen = *(const uint32_t *)(p + 4); nsrc = p[8]; p += 9;
+    if (nsrc > 8 || p + nsrc * 8 > end || outlen > (256u << 20)) return 0;
+    for (i = 0; i < nsrc; i++) {
+        uint32_t idx = *(const uint32_t *)(p + i * 8), size = *(const uint32_t *)(p + i * 8 + 4);
+        const uint32_t *e;
+        uint64_t off;
+        if (idx >= n) goto out;
+        e = (const uint32_t *)(info + 8 + (uint64_t)idx * 16);
+        if (e[2] != size || e[1] != size || (e[3] & 0xff)) { jlog("delta %.*s: source #%u differs\n", r->namelen, r->name, idx); goto out; }
+        off = ((uint64_t)e[0] << 8) | (e[3] >> 24);
+        src[i] = (uint8_t *)malloc(size ? size : 1); srclen[i] = size;
+        if (!src[i] || !read_at(h, off, src[i], size)) goto out;
+    }
+    p += nsrc * 8;
+    out = (uint8_t *)malloc(outlen ? outlen : 1);
+    if (!out) goto out;
+    while (p < end) {
+        uint8_t op = *p++;
+        if (op == 0) break;
+        if (op == 1) {
+            uint32_t s, so, sl;
+            if (p + 9 > end) goto out;
+            s = p[0]; so = *(const uint32_t *)(p + 1); sl = *(const uint32_t *)(p + 5); p += 9;
+            if (s >= nsrc || so > srclen[s] || sl > srclen[s] - so || sl > outlen - o) goto out;
+            memcpy(out + o, src[s] + so, sl); o += sl;
+        } else if (op == 2) {
+            uint32_t l;
+            if (p + 4 > end) goto out;
+            l = *(const uint32_t *)p; p += 4;
+            if (l > (uint32_t)(end - p) || l > outlen - o) goto out;
+            memcpy(out + o, p, l); o += l; p += l;
+        } else goto out;
+    }
+    if (o != outlen) goto out;
+    r->data = out; r->len = outlen; out = NULL; ok = 1;
+    jlog("delta %.*s: built %u bytes\n", r->namelen, r->name, outlen);
+out:
+    for (i = 0; i < 8; i++) free(src[i]);
+    free(out);
+    return ok;
+}
+
 /* parse the DAT index with our own handle and find the files to replace. base = DAT file name (no dir) */
 static int setup_dat(DatH *d, HANDLE h, const char *base)
 {
@@ -114,12 +176,14 @@ static int setup_dat(DatH *d, HANDLE h, const char *base)
     d->vend = d->vbase;
     d->p = (Patch *)calloc(g_nrepl + 1, sizeof(Patch));
     for (k = 0; k < (uint32_t)g_nrepl; k++) {
-        const Repl *r = &g_repl[k];
+        Repl *r = &g_repl[k];
         const uint32_t *e;
         if (!name_is(r->dat, r->datlen, base)) continue;
         if (r->index >= n) { jlog("%s: #%u out of range (skipped)\n", base, r->index); continue; }
         e = (const uint32_t *)(info + 8 + r->index * 16);
         if (e[2] != r->origsize) { jlog("%s: #%u %.*s size %u != %u (skipped)\n", base, r->index, r->namelen, r->name, e[2], r->origsize); continue; }
+        if (r->delta == 0 && r->len >= 4 && !memcmp(r->data, "LJPD", 4)) r->delta = build_delta(r, h, info, n) ? 1 : -1;
+        if (r->delta < 0) continue;
         d->p[d->np].idx = r->index;
         d->p[d->np].r = r;
         d->p[d->np].voff = d->vend;
@@ -131,7 +195,10 @@ static int setup_dat(DatH *d, HANDLE h, const char *base)
     lstrcpynA(d->name, base, sizeof d->name);
     d->offs = (uint64_t *)malloc(sizeof(uint64_t) * (n ? n : 1));
     d->seen = (uint8_t *)calloc(n ? n : 1, 1);
-    for (i = 0; i < n; i++) d->offs[i] = ((uint64_t)(*(uint32_t *)(info + 8 + i * 16)) << 8 << 16) | i;
+    for (i = 0; i < n; i++) {
+        const uint32_t *e = (const uint32_t *)(info + 8 + i * 16);
+        d->offs[i] = ((((uint64_t)e[0] << 8) | (e[3] >> 24)) << 16) | i;
+    }
     qsort(d->offs, n, sizeof(uint64_t), cmp64);
     any = 1;
 #else
@@ -142,12 +209,13 @@ out:
     return any && d->nfiles;
 }
 
-/* LEGO Star Wars: The Complete Saga passes a fixed size of 2 MB (0x200000) to D3DX when it creates a font
-   texture from the font file ("mov [eax+1Ch], ecx / mov dword [eax+20h], 200000h"). The Japanese font
+/* LEGO Star Wars: The Complete Saga and LEGO Batman pass a fixed size of 2 MB (0x200000) to D3DX when they create a
+   font texture from the font file ("mov [eax+1Ch], ecx / mov dword [eax+20h], 200000h"). The Japanese font
    texture is larger, so raise that size. The exe is unpacked at run time, so this runs on the first DAT open. */
 static void patch_tex_size(void)
 {
-    static const uint8_t pat[] = { 0x89, 0x48, 0x1C, 0xC7, 0x40, 0x20, 0x00, 0x00, 0x20, 0x00 };
+    /* mov [eax+d], ecx / mov dword [eax+d+4], 200000h  (d = 1Ch in Star Wars, 74h in LEGO Batman) */
+    static const uint8_t imm[] = { 0x00, 0x00, 0x20, 0x00 };
     static int done;
     uint8_t *mod = (uint8_t *)GetModuleHandleA(NULL), *p, *end, *hit = NULL;
     IMAGE_NT_HEADERS *nt;
@@ -156,8 +224,9 @@ static void patch_tex_size(void)
     done = 1;
     nt = (IMAGE_NT_HEADERS *)(mod + ((IMAGE_DOS_HEADER *)mod)->e_lfanew);
     p = mod + nt->OptionalHeader.BaseOfCode;
-    end = p + nt->OptionalHeader.SizeOfCode - sizeof pat;
-    for (; p < end; p++) if (p[0] == 0x89 && !memcmp(p, pat, sizeof pat)) { hit = p; n++; }
+    end = p + nt->OptionalHeader.SizeOfCode - 10;
+    for (; p < end; p++)
+        if (p[0] == 0x89 && p[1] == 0x48 && p[3] == 0xC7 && p[4] == 0x40 && p[5] == (uint8_t)(p[2] + 4) && !memcmp(p + 6, imm, 4)) { hit = p; n++; }
     if (n == 1) {
         DWORD old;
         if (VirtualProtect(hit + 6, 4, PAGE_EXECUTE_READWRITE, &old)) {
@@ -169,17 +238,32 @@ static void patch_tex_size(void)
     }
 }
 
-/* LEGO Star Wars: The Complete Saga keeps the PC settings menu words in the exe: per language a table of
-   40 {u32 id, const char *text} pairs. Point the English tables (found by id 1 = "Quit to Windows") at Japanese. */
-static const char *const g_menu_ja[39] = {
-    "終了", "Windows に戻る", "デモメニューに戻る", "ゲームに戻る", "低", "中", "高", "再開",
-    "決定", "やめる", "戻る", "はい", "いいえ", "OK", "キャンセル", "オン", "オフ",
-    "初期設定に戻す", "映像設定", "画面解像度", "リフレッシュレート", "垂直同期", "アスペクト比",
-    "高画質グラフィック", "画面解像度に合わせる", "現在の設定を使う", "テクスチャの品質", "元に戻す",
-    "変更を反映するには、ゲームを再起動してください。", "エフェクト設定", "フルシーン・アンチエイリアス",
-    "外部で設定済み", "影", "ブルーム", "被写界深度", "スピードブラー", "動的ライトの品質",
-    "エッジ・アンチエイリアス", "操作方法を表示",
+/* LEGO Star Wars: The Complete Saga and LEGO Batman keep the PC settings menu words in the exe: per language a
+   table of 40 {u32 id, const char *text} pairs. Point the English tables (found by id 1 = "Quit to Windows") at
+   Japanese, word by word (the ids differ between the games). */
+static const char *const g_menu_words[][2] = {
+    {"Quit", "終了"}, {"Quit to Windows", "Windows に戻る"}, {"Quit to Demos Menu", "デモメニューに戻る"},
+    {"Return to game", "ゲームに戻る"}, {"Low", "低"}, {"Medium", "中"}, {"High", "高"}, {"Resume", "再開"},
+    {"Accept", "決定"}, {"Decline", "やめる"}, {"Back", "戻る"}, {"Yes", "はい"}, {"No", "いいえ"}, {"OK", "OK"},
+    {"Cancel", "キャンセル"}, {"On", "オン"}, {"Off", "オフ"}, {"Reset To Defaults", "初期設定に戻す"},
+    {"Video Settings", "映像設定"}, {"Screen Resolution", "画面解像度"}, {"Refresh Rate", "リフレッシュレート"},
+    {"Vertical Sync", "垂直同期"}, {"Aspect Ratio", "アスペクト比"}, {"Enhanced Graphics", "高画質グラフィック"},
+    {"From Screen-Res", "画面解像度に合わせる"}, {"Use current settings", "現在の設定を使う"},
+    {"Texture Quality", "テクスチャの品質"}, {"Revert", "元に戻す"},
+    {"You must restart the game for these changes to take effect!", "変更を反映するには、ゲームを再起動してください。"},
+    {"Effects Settings", "エフェクト設定"}, {"FSAA", "フルシーン・アンチエイリアス"}, {"Externally Set", "外部で設定済み"},
+    {"Shadows", "影"}, {"Bloom", "ブルーム"}, {"Depth of Field", "被写界深度"}, {"Speed Blur", "スピードブラー"},
+    {"Dynamic Light Quality", "動的ライトの品質"}, {"Edge AA", "エッジ・アンチエイリアス"},
+    {"Ambient Occlusion", "アンビエントオクルージョン"}, {"Show Game Controls", "操作方法を表示"},
 };
+
+static const char *menu_ja(const char *en)
+{
+    int i;
+    for (i = 0; i < (int)(sizeof g_menu_words / sizeof g_menu_words[0]); i++)
+        if (!strcmp(en, g_menu_words[i][0])) return g_menu_words[i][1];
+    return NULL;
+}
 
 static void patch_menu_strings(void)
 {
@@ -208,7 +292,12 @@ static void patch_menu_strings(void)
                             if (VirtualProtect(t, 40 * 8, PAGE_READWRITE, &old)) {
                                 for (j = 0; j < 40; j++) {
                                     uint32_t id = *(uint32_t *)(t + j * 8);
-                                    if (id < 39) *(const char **)(t + j * 8 + 4) = g_menu_ja[id];
+                                    const char *en = *(const char **)(t + j * 8 + 4), *ja = NULL;
+                                    MEMORY_BASIC_INFORMATION m2;
+                                    (void)id;
+                                    if (en && VirtualQuery(en, &m2, sizeof m2) && m2.State == MEM_COMMIT && !(m2.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+                                        ja = menu_ja(en);
+                                    if (ja) *(const char **)(t + j * 8 + 4) = ja;
                                 }
                                 VirtualProtect(t, 40 * 8, old, &old);
                                 ntab++;
@@ -224,11 +313,109 @@ static void patch_menu_strings(void)
     if (ntab) jlog("menu string tables patched: %d\n", ntab);
 }
 
+/* ---------- LEGO Batman 3 front-end text downloaded from the publisher's server ----------
+   The title menu tiles read %APPDATA%\...\gui3\localisation\*.csv (downloaded; it has a JAPANESE column).
+   When the pack enables it, such a file is opened as a temporary copy in which every language column holds the
+   JAPANESE text (rows without Japanese are unchanged). */
+static int g_jpcsv;
+
+static int csv_has_ja(const uint8_t *s, const uint8_t *e)
+{
+    if (e - s >= 4 && !memcmp(s, "(not", 4)) return 0;
+    for (; s < e; s++) if (*s >= 0xe3 && *s <= 0xe9) return 1;   /* 3-byte UTF-8: kana / CJK */
+    return 0;
+}
+
+/* all fields quoted, no escaped quotes (TT text CSV) */
+static uint8_t *csv_jp_columns(const uint8_t *in, size_t n, size_t *outn)
+{
+    uint8_t *out = (uint8_t *)malloc(n * 16 + 64);
+    size_t o = 0, i = 0;
+    int ji = -1, hdr = 1;
+    if (!out) return NULL;
+    while (i < n) {
+        if (in[i] == '"') {
+            const uint8_t *fs[64], *fe[64];
+            int nf = 0, c;
+            for (;;) {
+                const uint8_t *q = (const uint8_t *)memchr(in + i + 1, '"', n - i - 1);
+                if (!q) { free(out); return NULL; }
+                if (nf == 64) { free(out); return NULL; }
+                fs[nf] = in + i + 1; fe[nf] = q; nf++;
+                i = (size_t)(q - in) + 1;
+                if (i + 1 < n && in[i] == ',' && in[i + 1] == '"') { i++; continue; }
+                break;
+            }
+            if (hdr) {
+                for (c = 0; c < nf; c++) if (fe[c] - fs[c] == 8 && !memcmp(fs[c], "JAPANESE", 8)) ji = c;
+                hdr = 0;
+            }
+            for (c = 0; c < nf; c++) {
+                const uint8_t *s = fs[c], *e = fe[c];
+                if (c >= 3 && ji >= 0 && ji < nf && csv_has_ja(fs[ji], fe[ji])) { s = fs[ji]; e = fe[ji]; }
+                out[o++] = c ? ',' : '"';
+                if (c) out[o++] = '"';
+                memcpy(out + o, s, e - s); o += e - s;
+                out[o++] = '"';
+            }
+        } else {
+            out[o++] = in[i++];
+        }
+    }
+    *outn = o;
+    return out;
+}
+
+static int is_gui3_csv(const wchar_t *p)
+{
+    size_t l = wcslen(p);
+    wchar_t lo[MAX_PATH];
+    size_t k;
+    if (l < 5 || l >= MAX_PATH) return 0;
+    for (k = 0; k <= l; k++) lo[k] = (wchar_t)towlower(p[k]);
+    for (k = 0; k < l; k++) if (lo[k] == L'/') lo[k] = L'\\';
+    return wcsstr(lo, L"\\gui3\\localisation\\") && !wcscmp(lo + l - 4, L".csv");
+}
+
+/* returns a temporary file path to open instead, or NULL */
+static const wchar_t *gui3_redirect(const wchar_t *path)
+{
+    static wchar_t tmp[MAX_PATH];
+    HANDLE h;
+    LARGE_INTEGER sz;
+    uint8_t *in = NULL, *out = NULL;
+    size_t on = 0;
+    DWORD got = 0, wr = 0;
+    const wchar_t *base;
+    int ok = 0;
+    if (!g_jpcsv || !is_gui3_csv(path)) return NULL;
+    h = o_CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    if (GetFileSizeEx(h, &sz) && sz.QuadPart > 0 && sz.QuadPart < (16 << 20) && (in = (uint8_t *)malloc((size_t)sz.QuadPart)))
+        ok = o_ReadFile(h, in, (DWORD)sz.QuadPart, &got, NULL) && got == (DWORD)sz.QuadPart;
+    o_CloseHandle(h);
+    if (ok) out = csv_jp_columns(in, got, &on);
+    free(in);
+    if (!out) return NULL;
+    base = wcsrchr(path, L'\\'); if (!base) base = wcsrchr(path, L'/'); base = base ? base + 1 : path;
+    if (!GetTempPathW(MAX_PATH - 40, tmp)) { free(out); return NULL; }
+    wcscat(tmp, L"legojp_"); wcsncat(tmp, base, MAX_PATH - wcslen(tmp) - 1);
+    h = o_CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, NULL);
+    ok = h != INVALID_HANDLE_VALUE && WriteFile(h, out, (DWORD)on, &wr, NULL) && wr == on;
+    if (h != INVALID_HANDLE_VALUE) o_CloseHandle(h);
+    free(out);
+    if (ok) jlog("gui3 csv redirected: %ls\n", base);
+    return ok ? tmp : NULL;
+}
+
 static void on_open(HANDLE h, const char *base)
 {
     const char *dot = strrchr(base, '.');
     int i;
     static int once;
+#ifdef LEGOJP_TEST
+    if (g_logreads) jlog("open %s -> %p\n", base, h);
+#endif
     if (h == INVALID_HANDLE_VALUE || !dot || _stricmp(dot, ".DAT")) return;
     patch_tex_size();
     if (!once) { once = 1; patch_menu_strings(); }
@@ -248,8 +435,18 @@ static void on_open(HANDLE h, const char *base)
 
 static HANDLE WINAPI h_CreateFileA(LPCSTR n, DWORD a, DWORD s, LPSECURITY_ATTRIBUTES sa, DWORD c, DWORD f, HANDLE t)
 {
-    HANDLE h = o_CreateFileA(n, a, s, sa, c, f, t);
+    HANDLE h;
     const char *b, *b2;
+#ifdef LEGOJP_TEST
+    if (g_logreads && n && strstr(n, ".csv")) jlog("CreateFileA %s a %x c %u jpcsv %d\n", n, a, c, g_jpcsv);
+#endif
+    if (g_jpcsv && n && c == OPEN_EXISTING && !(a & GENERIC_WRITE)) {
+        wchar_t w[MAX_PATH];
+        const wchar_t *r;
+        if (MultiByteToWideChar(CP_ACP, 0, n, -1, w, MAX_PATH) && (r = gui3_redirect(w)))
+            return o_CreateFileW(r, a, s, sa, c, f, t);
+    }
+    h = o_CreateFileA(n, a, s, sa, c, f, t);
     if (h == INVALID_HANDLE_VALUE || !n || !g_nrepl && !g_logreads) return h;
     b = strrchr(n, 0x5c); b2 = strrchr(n, '/');
     if (b2 > b) b = b2;
@@ -260,9 +457,15 @@ static HANDLE WINAPI h_CreateFileA(LPCSTR n, DWORD a, DWORD s, LPSECURITY_ATTRIB
 
 static HANDLE WINAPI h_CreateFileW(LPCWSTR n, DWORD a, DWORD s, LPSECURITY_ATTRIBUTES sa, DWORD c, DWORD f, HANDLE t)
 {
-    HANDLE h = o_CreateFileW(n, a, s, sa, c, f, t);
-    const wchar_t *b, *b2;
+    HANDLE h;
+    const wchar_t *b, *b2, *r;
     char nb[MAX_PATH];
+#ifdef LEGOJP_TEST
+    if (g_logreads && n && wcsstr(n, L".csv")) jlog("CreateFileW %ls a %x c %u jpcsv %d\n", n, a, c, g_jpcsv);
+#endif
+    if (g_jpcsv && n && c == OPEN_EXISTING && !(a & GENERIC_WRITE) && (r = gui3_redirect(n)))
+        return o_CreateFileW(r, a, s, sa, c, f, t);
+    h = o_CreateFileW(n, a, s, sa, c, f, t);
     if (h == INVALID_HANDLE_VALUE || !n || !g_nrepl && !g_logreads) return h;
     b = wcsrchr(n, 0x5c); b2 = wcsrchr(n, L'/');
     if (b2 > b) b = b2;
@@ -314,6 +517,9 @@ static BOOL WINAPI h_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD got, LPOVER
     LARGE_INTEGER pos = {0}, z = {0};
     BOOL r;
     int i;
+#ifdef LEGOJP_TEST
+    if (d && ov && g_logreads) { static int cnt; if (cnt++ < 50) jlog("ovread %s off %llx n %u\n", d->name, ((uint64_t)ov->OffsetHigh << 32) | ov->Offset, n); }
+#endif
     if (!d || ov) return o_ReadFile(h, buf, n, got, ov);
     o_SetFilePointerEx(h, z, &pos, FILE_CURRENT);
     if ((uint64_t)pos.QuadPart >= d->vbase) {
@@ -334,6 +540,7 @@ static BOOL WINAPI h_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD got, LPOVER
     }
 #ifdef LEGOJP_TEST
     if (d->offs) log_read(d, (uint64_t)pos.QuadPart);
+    if (g_logreads > 1) { static int cnt; if (cnt++ < 400) jlog("rd %s %p pos %llx n %x\n", d->name, h, (uint64_t)pos.QuadPart, n); }
 #endif
     r = o_ReadFile(h, buf, n, got, ov);
     if (r) {
@@ -350,7 +557,7 @@ static BOOL WINAPI h_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD got, LPOVER
             }
             e[0] = (uint32_t)(d->p[i].voff >> 8);
             e[1] = e[2] = d->p[i].r->len;
-            e[3] &= ~0xffu;
+            e[3] &= 0x00ffff00u;    /* no compression; the top byte is the low byte of the offset in newer DATs */
             for (j = 0; j < 16; j++) {
                 uint64_t a = eo + j;
                 if (a >= p0 && a < p1) ((uint8_t *)buf)[a - p0] = ((uint8_t *)e)[j];
@@ -390,6 +597,11 @@ static void parse_pack(uint8_t *p, uint32_t n)
         r->index = *(uint32_t *)(p + o); r->origsize = *(uint32_t *)(p + o + 4); r->len = *(uint32_t *)(p + o + 8); o += 12;
         r->data = p + o; o += r->len;
         if (o > n) break;
+        if (!r->datlen) {   /* settings: "" "lang" index = language id */
+            if (name_is(r->name, r->namelen, "lang")) g_langid = (LANGID)r->index;
+            if (name_is(r->name, r->namelen, "jpcsv")) g_jpcsv = (int)r->index;
+            continue;
+        }
         g_nrepl++;
     }
     jlog("pack: %d files\n", g_nrepl);
@@ -430,7 +642,7 @@ void dat_init(HINSTANCE self)
 #ifdef LEGOJP_TEST
     {
         char v[8];
-        g_logreads = GetEnvironmentVariableA("LEGOJP_LOGREADS", v, sizeof v) > 0;
+        if (GetEnvironmentVariableA("LEGOJP_LOGREADS", v, sizeof v) > 0) g_logreads = atoi(v) > 0 ? atoi(v) : 1;
     }
 #endif
     if (!g_nrepl && !g_logreads) return;

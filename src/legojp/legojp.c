@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include "legojp.h"
 
 void proxy_init(void);
@@ -52,8 +53,10 @@ void *iat_hook(const char *dll, const char *func, void *repl)
    どの言語の列も日本語にしてあるので、ゲームは英語のつもりで日本語を表示する。 */
 /* the games pick their text language from the Windows language; the Japanese text is in the English slot,
    so always report English (US). (Marvel also crashes at start-up when it sees Japanese.) */
-static LANGID fix_lang(LANGID l) { (void)l; return 0x409; }
-static LCID fix_lcid(LCID l) { (void)l; return 0x409; }
+/* LEGO Batman 3 has its own Japanese text and font: there the pack asks for Japanese (0x411) instead. */
+LANGID g_langid = 0x409;
+static LANGID fix_lang(LANGID l) { (void)l; return g_langid; }
+static LCID fix_lcid(LCID l) { (void)l; return g_langid; }
 static LANGID WINAPI h_GetUserDefaultLangID(void) { return fix_lang(GetUserDefaultLangID()); }
 static LANGID WINAPI h_GetSystemDefaultLangID(void) { return fix_lang(GetSystemDefaultLangID()); }
 static LANGID WINAPI h_GetUserDefaultUILanguage(void) { return fix_lang(GetUserDefaultUILanguage()); }
@@ -82,8 +85,12 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
         proxy_init();
         if (GetEnvironmentVariableA("LEGOJP_LOG", lp, MAX_PATH)) g_log = fopen(lp, "w");
         jlog("legojp start\n");
+        dat_init(h);     /* the pack can set g_langid */
+#ifdef LEGOJP_TEST
+        { char v[16]; if (GetEnvironmentVariableA("LEGOJP_LANGID", v, sizeof v)) g_langid = (LANGID)strtoul(v, NULL, 0); }
+#endif
+        jlog("langid %x\n", g_langid);
         lang_init();
-        dat_init(h);
 #ifdef LEGOJP_TEST
         { void testio_init(void); testio_init(); }
 #endif

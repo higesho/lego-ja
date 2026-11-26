@@ -19,9 +19,21 @@ GAMES = {
     'sw': ('Lego Star Wars Saga', [
         ('GAME.DAT', 3593, 'ltxt'), ('GAME.DAT', 1789, 'csv1'),
         ('GAME.DAT', 11915, 'fnt')]),
+    'bat1': ('Lego Batman', [
+        ('GAME.DAT', 10337, 'ltxt'), ('GAME.DAT', 10319, 'ltxt'), ('GAME.DAT', 10353, 'csv1'),
+        ('GAME.DAT', 10322, 'fnt')]),
+    'bat2': ('LEGO Batman 2', [
+        ('GAME.DAT', 471, 'csv'), ('GAME.DAT', 5641, 'font')]),
+    # LEGO Batman 3 has an official Japanese column and font (not used by the PC version):
+    # csvjp = text.csv rebuilt at run time from the game's own Japanese column (only the missing strings are ours),
+    # fontjp = the game's Japanese font (GAME2.DAT #10247) with our extra glyphs, served as font_nxg.ft2
+    'bat3': ('LEGO Batman 3 Beyond Gotham', [
+        ('GAME2.DAT', 1413, 'csvjp'), ('GAME2.DAT', 8324, 'csv'), ('GAME2.DAT', 18332, 'fontjp:10247')]),
+    'hobbit': ('LEGO - The Hobbit', [
+        ('GAME2.DAT', 1522, 'csv'), ('GAME3.DAT', 102, 'font')]),
 }
 # text groups translated together (shared glossary): hp1 + hp2 -> 'hp'
-GROUP = {'marvel': 'marvel', 'hp1': 'hp', 'hp2': 'hp', 'sw': 'sw'}
+GROUP = {'marvel': 'marvel', 'hp1': 'hp', 'hp2': 'hp', 'sw': 'sw', 'bat1': 'bat', 'bat2': 'bat', 'bat3': 'bat', 'hobbit': 'hobbit'}
 
 def orig_name(dat, idx, name): return '%s__%d__%s' % (dat, idx, name)
 
@@ -32,13 +44,18 @@ def extract(game):
     dats = {}
     for dat, idx, kind in files:
         D = dats.get(dat) or dats.setdefault(dat, Dat(G + inst + '/' + dat))
-        o, z, u, fl = D.entry(idx)
-        raw = D.raw(idx)
-        if fl & 0xff == 2: raw = lz2k.decompress(raw)
-        assert len(raw) == u, (game, dat, idx)
+        def get(i):
+            o, z, u, fl = D.entry(i)
+            raw = D.raw(i)
+            if fl & 0xff == 2: raw = lz2k.decompress(raw)
+            assert len(raw) == u, (game, dat, i)
+            return raw
         name = D.name(idx).split('\\')[-1]
         p = os.path.join(od, orig_name(dat, idx, name))
-        open(p, 'wb').write(raw)
+        open(p, 'wb').write(get(idx))
+        if kind.startswith('fontjp:'):     # the source font is kept next to it
+            j = int(kind.split(':')[1])
+            open(os.path.join(od, orig_name(dat, j, D.name(j).split('\\')[-1])), 'wb').write(get(j))
         out.append((dat, idx, kind, name, p))
     return out
 
@@ -46,16 +63,20 @@ def strings(files):
     items = []
     for dat, idx, kind, name, p in files:
         raw = open(p, 'rb').read()
-        if kind in ('csv', 'csv1'):
-            s = CsvSrc(raw, 3 if kind == 'csv' else 1)
+        if kind in ('csv', 'csv1', 'csvjp'):
+            s = CsvSrc(raw, 3 if kind != 'csv1' else 1)
+            ji = s.header.index('JAPANESE') if kind == 'csvjp' else None
             for label, plat, typ, en, v in s.entries():
                 if plat not in PLAT_OK: continue
+                if ji is not None and len(v) > ji and has_ja(v[ji]): continue     # the game's own Japanese
                 items.append({'label': label, 'type': typ or 'Text', 'en': en, 'file': name})
         elif kind == 'ltxt':
             s = LtxtSrc(raw)
             for i, num, sect, en in s.entries():
                 items.append({'label': num, 'type': sect[:60], 'en': en, 'file': name})
     return items
+
+def has_ja(t): return bool(re.search(r'[\u3040-\u30ff\u4e00-\u9fff]', t))
 
 def keep(en):
     t = en.strip()
@@ -65,7 +86,9 @@ def keep(en):
 
 if __name__ == '__main__':
     groups = {}
+    todo = sys.argv[1:] or list(GAMES)
     for g in GAMES:
+        if GROUP[g] not in {GROUP[t] for t in todo}: continue
         files = extract(g)
         json.dump([(d, i, k, n, os.path.relpath(p, ROOT)) for d, i, k, n, p in files], open(os.path.join(ROOT, g, 'files.json'), 'w'), indent=1)
         groups.setdefault(GROUP[g], []).extend(strings(files))

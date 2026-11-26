@@ -6,6 +6,10 @@ TITLES = {
     'hp2': ('LEGO ハリー・ポッター 第5章-7章', 'LEGOHP2_JP'),
     'marvel': ('LEGO マーベル スーパー・ヒーローズ', 'LEGOMARVEL_JP'),
     'sw': ('LEGO スター・ウォーズ コンプリート サーガ', 'LEGOSW_JP'),
+    'bat1': ('LEGO バットマン ザ・ビデオゲーム', 'LEGOBAT1_JP'),
+    'bat2': ('LEGO バットマン2 DC スーパーヒーローズ', 'LEGOBAT2_JP'),
+    'bat3': ('LEGO バットマン3 ザ・ゲーム ゴッサムから宇宙へ', 'LEGOBAT3_JP'),
+    'hobbit': ('LEGO ホビット', 'LEGOHOBBIT_JP'),
 }
 game, ver = sys.argv[1], sys.argv[2]
 v = [int(x) for x in ver.split('.')] + [0] * (4 - len(ver.split('.')))

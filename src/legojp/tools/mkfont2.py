@@ -20,6 +20,10 @@ STYLE = {
     'hp':     dict(font='NotoSerifJP-VF.ttf', var='Bold',  size=32, stroke=3, cell=48, top=8,  outline=(0, 0, 0)),
     'marvel': dict(font='NotoSansJP-VF.ttf',  var='Black', size=56, stroke=5, cell=96, top=26, outline=(0, 0, 0)),
     'sw':     dict(font='NotoSansJP-VF.ttf',  var='Bold',  size=36, stroke=3, cell=48, top=5,  outline=(40, 40, 40)),
+    'bat1':   dict(font='NotoSansJP-VF.ttf',  var='Bold',  size=34, stroke=3, cell=48, top=6,  outline=(20, 20, 20)),
+    'bat2':   dict(font='NotoSansJP-VF.ttf',  var='Bold',  size=34, stroke=3, cell=48, top=6,  outline=(20, 20, 20)),
+    'bat3':   dict(font='NotoSansJP-VF.ttf',  var='Bold',  size=31, stroke=3, cell=44, top=7,  outline=(0, 0, 0)),
+    'hobbit': dict(font='NotoSerifJP-VF.ttf', var='Bold',  size=28, stroke=3, cell=40, top=6,  outline=(0, 0, 0)),
 }
 
 def render_glyphs(chars, st):

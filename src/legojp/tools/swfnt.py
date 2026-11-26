@@ -6,6 +6,7 @@
 import struct
 
 PTRS = [4, 8, 0x38, 0x3c, 0x40, 0x44, 0x48, 0x4c, 0x50, 0x54, 0x58]
+TI_PTRS = [0x1c, 0x28, 0x30, 0x3c, 0x4c]
 
 class SwFnt:
     def __init__(self, d):
@@ -13,7 +14,15 @@ class SwFnt:
         T = struct.unpack_from('<I', d, 0)[0]
         n = struct.unpack_from('<I', d, T)[0]
         rel = [T + 4 + 4 * i + struct.unpack_from('<i', d, T + 4 + 4 * i)[0] for i in range(n)]
-        assert rel == PTRS, rel
+        # LEGO Batman: a 0x80-byte texture info block (w, h, ..., mips at +0x40, DDS size at +0x44, 5 null pointers)
+        # sits between the map and the DDS; 0x18 = its offset - 0x20
+        self.texinfo = None
+        if len(rel) == len(PTRS) + len(TI_PTRS):
+            ti = struct.unpack_from('<I', d, 0x18)[0] + 0x20
+            assert rel == PTRS + [ti + o for o in TI_PTRS], rel
+            self.texinfo = bytearray(d[ti:ti + 0x80])
+        else:
+            assert rel == PTRS, rel
         assert len(d) == T + 4 + 4 * n
         ng, nm = struct.unpack_from('<II', d, 0x1c)
         self.height, self.base, self.spacew = struct.unpack_from('<3f', d, 0x24)
@@ -26,7 +35,8 @@ class SwFnt:
         self.map = self.map[:-1]
         dd = 8 + struct.unpack_from('<I', d, 8)[0]
         assert d[dd:dd + 4] == b'DDS '
-        assert struct.unpack_from('<I', d, 0x18)[0] == dd - 0x20
+        if self.texinfo is None: assert struct.unpack_from('<I', d, 0x18)[0] == dd - 0x20
+        else: assert dd == struct.unpack_from('<I', d, 0x18)[0] + 0x20 + 0x80
         self.dds = d[dd:T]
 
     def build(self):
@@ -37,20 +47,32 @@ class SwFnt:
         gend = 0x60 + len(gl)
         # map start: 4-aligned, and (map end + 0x1c) 0x80-aligned so that DDS - 0x20 is the terminator offset, as in the original
         ms = gend
-        while (ms + len(mp) + 0x1c) % 0x80: ms += 4
-        dd = ms + len(mp) + 0x1c
-        body = bytes(h) + gl + b'\0' * (ms - gend) + mp + b'\0' * 0x1c
+        if self.texinfo is None:
+            while (ms + len(mp) + 0x1c) % 0x80: ms += 4
+            dd = ms + len(mp) + 0x1c
+            body = bytes(h) + gl + b'\0' * (ms - gend) + mp + b'\0' * 0x1c
+            r18 = dd - 0x20
+        else:
+            ti = (ms + len(mp) + 0x7f) & ~0x7f
+            dd = ti + 0x80
+            t = bytearray(self.texinfo)
+            hh, ww = struct.unpack_from('<II', self.dds, 12)
+            struct.pack_into('<II', t, 0, ww, hh)
+            struct.pack_into('<II', t, 0x40, struct.unpack_from('<I', self.dds, 28)[0], len(self.dds))
+            body = bytes(h) + gl + mp + b'\0' * (ti - ms - len(mp)) + bytes(t)
+            r18 = ti - 0x20
         assert len(body) == dd
         T = dd + len(self.dds)
         out = bytearray(body + self.dds)
         struct.pack_into('<I', out, 0, T)
         struct.pack_into('<I', out, 8, dd - 8)
-        struct.pack_into('<III', out, 0x18, dd - 0x20, len(self.glyphs), len(m))
+        struct.pack_into('<III', out, 0x18, r18, len(self.glyphs), len(m))
         struct.pack_into('<3f', out, 0x24, self.height, self.base, self.spacew)
         struct.pack_into('<I', out, 0x44, 0x60 - 0x44)
         struct.pack_into('<I', out, 0x48, ms - 0x48)
-        out += struct.pack('<I', len(PTRS))
-        for i, t in enumerate(PTRS):
+        ptrs = PTRS + ([r18 + 0x20 + o for o in TI_PTRS] if self.texinfo is not None else [])
+        out += struct.pack('<I', len(ptrs))
+        for i, t in enumerate(ptrs):
             out += struct.pack('<i', t - (T + 4 + 4 * i))
         return bytes(out)
 

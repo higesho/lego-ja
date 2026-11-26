@@ -5,9 +5,16 @@
 import json, os, sys, glob, struct, ctypes
 from textsrc import CsvSrc, LtxtSrc, PLAT_OK
 import mkfont2
+import delta as deltamod
+import re
 sys.stdout.reconfigure(encoding='utf-8')
 ROOT = os.path.dirname(os.path.abspath(__file__))
-GROUP = {'marvel': 'marvel', 'hp1': 'hp', 'hp2': 'hp', 'sw': 'sw'}
+GROUP = {'marvel': 'marvel', 'hp1': 'hp', 'hp2': 'hp', 'sw': 'sw', 'bat1': 'bat', 'bat2': 'bat', 'bat3': 'bat', 'hobbit': 'hobbit'}
+# settings entries for the DLL: lang = language id it reports (0x409 if absent), jpcsv = use the JAPANESE column
+# of the downloaded front-end CSVs (LEGO Batman 3)
+SETTINGS = {'bat3': [('jpcsv', 1)]}
+# extra text shown by the game from outside the DAT (characters for the font): game -> [(csv file, column)]
+EXTRA_CHARS = {'bat3': [('bat3/orig/dl_text_gamescom.csv', 'JAPANESE')]}
 
 def load_map(grp):
     d = os.path.join(ROOT, 'text_' + grp)
@@ -56,8 +63,10 @@ def lzms(data):
     cab.CloseCompressor(h)
     return buf.raw[:need.value]
 
-def pack(entries, out):
-    """entries: (dat, name, index, origsize, data)  ->  "LJPZ" u32 rawsize + LZMS("LJP2" ...)"""
+def pack(entries, out, settings=()):
+    """entries: (dat, name, index, origsize, data)  ->  "LJPZ" u32 rawsize + LZMS("LJP2" ...)
+    settings: (name, value) -> extra entries ("" name index=value) for the DLL"""
+    entries = entries + [('', k, v, 0, b'') for k, v in settings]
     raw = b'LJP2' + struct.pack('<I', len(entries))
     for dat, name, idx, osz, data in entries:
         dn, n = dat.encode('ascii'), name.encode('ascii')
@@ -82,6 +91,27 @@ def main(game):
     leftover = []
     for dat, idx, kind, name, rel in files:
         raw = open(os.path.join(ROOT, rel), 'rb').read()
+        if kind == 'csvjp':
+            # the game's own Japanese column for every string that has one, our translation for the rest
+            hdr = CsvSrc(raw).header
+            ji = hdr.index('JAPANESE')
+            def has_ja(t): return bool(re.search(r'[\u3040-\u30ff\u4e00-\u9fff]', t))
+            def choose(f, c, ji=ji):
+                if f[0] == 'LABEL' or c < 3 or len(f) <= 3: return None
+                if len(f) > ji and has_ja(f[ji]): return ('col', ji)
+                ja = tr.get(f[3])
+                return ('text', ja) if ja is not None else None
+            dl = deltamod.csv_delta(idx, raw, choose)
+            full = dl.apply()
+            s = CsvSrc(full)
+            for label, plat, typ, en, v in s.entries():
+                if plat in PLAT_OK:
+                    for c in v[3:]: chars.update(c)
+            n = sum(1 for o in dl.ops if o[0] == 'i')
+            print(name, 'delta', dl.stats())
+            open(os.path.join(B, name), 'wb').write(full)
+            built.append((dat, name, idx, len(raw), dl.encode()))
+            continue
         if kind in ('csv', 'csv1'):
             s = CsvSrc(raw, 3 if kind == 'csv' else 1)
             n = s.apply(lambda en, label, typ: tr.get(en))
@@ -107,12 +137,18 @@ def main(game):
     tset = set(tr)
     for x in items:
         if x['en'] not in tset: leftover.append(x)
+    # strings of this game only (the group may hold several games)
     # characters shown from outside the text files: the DLL's own strings (src/*.c, e.g. the Star Wars PC menu
     # words) and, to be safe, every kana and the common full-width punctuation
     import re as _re
     for p in glob.glob(os.path.join(ROOT, 'src', '*.c')):
         for lit in _re.findall(r'"((?:[^"\\]|\\.)*)"', open(p, encoding='utf-8').read()):
             if _re.search(r'[　-鿿＀-￯]', lit): chars.update(lit)
+    for p, col in EXTRA_CHARS.get(game, ()):
+        es = CsvSrc(open(os.path.join(ROOT, p), 'rb').read())
+        ci = es.header.index(col)
+        for label, plat, typ, en, v in es.entries():
+            if len(v) > ci: chars.update(v[ci])
     chars.update(chr(c) for c in range(0x3041, 0x3097))
     chars.update(chr(c) for c in range(0x30a1, 0x30fb))
     chars.update('ー・、。「」『』（）！？：；…―〜＆％＋－＝／＊　')
@@ -121,10 +157,26 @@ def main(game):
     open(os.path.join(B, 'chars.txt'), 'w', encoding='utf-8').write(''.join(chars))
     print('chars', len(chars))
     for dat, idx, kind, name, rel in fonts:
+        if kind.startswith('fontjp:'):
+            # the game's own Japanese font with our extra glyphs, sent as a delta against it
+            j = int(kind.split(':')[1])
+            src = [p for p in glob.glob(os.path.join(ROOT, game, 'orig', '%s__%d__*' % (dat, j)))][0]
+            # its map points one glyph too far for every non-ASCII character: fix the map first
+            import fixmap
+            from ft2 import Ft2
+            F = Ft2(open(src, 'rb').read())
+            print('font map fixed:', fixmap.fix(F), 'entries')
+            fixed = os.path.join(B, 'fixed_' + os.path.basename(src))
+            open(fixed, 'wb').write(F.build())
+            out = mkfont2.build(fixed, 'ft2', chars, os.path.join(B, name), game)
+            dl = deltamod.bin_delta([(j, open(src, 'rb').read())], out)
+            print(name, 'delta', dl.stats())
+            built.append((dat, name, idx, os.path.getsize(os.path.join(ROOT, rel)), dl.encode()))
+            continue
         out = mkfont2.build(os.path.join(ROOT, rel), 'fnt' if kind == 'fnt' else 'ft2', chars, os.path.join(B, name),
-                            'hp' if grp == 'hp' else grp)
+                            'hp' if grp == 'hp' else (game if game in mkfont2.STYLE else grp))
         built.append((dat, name, idx, os.path.getsize(os.path.join(ROOT, rel)), out))
-    pack(built, os.path.join(B, 'pack.bin'))
+    pack(built, os.path.join(B, 'pack.bin'), SETTINGS.get(game, ()))
 
 if __name__ == '__main__':
     for g in sys.argv[1:]: main(g)
